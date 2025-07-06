@@ -1,83 +1,76 @@
-from flask import Flask, render_template, jsonify, request
-from auth import auth_bp
-from portfolio import portfolio_bp
-
-import requests
-import numpy as np
+from flask import Flask, render_template, request, redirect, session, url_for
+import boto3
 
 app = Flask(__name__)
-app.secret_key = "your-very-secret-key"
+app.secret_key = "super-secret-key"  # Change this to a strong random key
 
-# Register Blueprints
-app.register_blueprint(auth_bp)
-app.register_blueprint(portfolio_bp)
+# Your AWS Cognito config
+COGNITO_CLIENT_ID = "<YOUR_CLIENT_ID>"
+COGNITO_USER_POOL_ID = "<YOUR_USER_POOL_ID>"
+COGNITO_REGION = "ap-south-1"
+
+cognito = boto3.client("cognito-idp", region_name=COGNITO_REGION)
 
 @app.route("/")
-def index():
-    return render_template("index.html")
+def home():
+    if "username" in session:
+        return redirect(url_for("profile"))
+    return redirect(url_for("login"))
 
-@app.route("/api/analyze", methods=["GET"])
-def analyze():
-    symbol = request.args.get("symbol")
-    if not symbol:
-        return jsonify({"error": "No symbol provided"}), 400
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        username = request.form["username"]
+        password = request.form["password"]
+        email = request.form["email"]
+        try:
+            cognito.sign_up(
+                ClientId=COGNITO_CLIENT_ID,
+                Username=username,
+                Password=password,
+                UserAttributes=[
+                    {"Name": "email", "Value": email}
+                ]
+            )
+            return (
+                "✅ Registration successful. Please check your email to confirm the account.<br>"
+                "<a href='/login'>Go to login</a>"
+            )
+        except Exception as e:
+            return f"❌ Registration error: {str(e)}"
+    return render_template("register.html")
 
-    # Example using Polygon.io (replace YOUR_API_KEY)
-    api_key = "8qL3vjv7pKPl5Q8U1CqUDKQN35QMvZE6"
-    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol.upper()}/range/1/day/2023-01-01/2023-12-31?adjusted=true&sort=desc&limit=120&apiKey={api_key}"
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form["username"]
+        password = request.form["password"]
+        try:
+            resp = cognito.initiate_auth(
+                ClientId=COGNITO_CLIENT_ID,
+                AuthFlow="USER_PASSWORD_AUTH",
+                AuthParameters={
+                    "USERNAME": username,
+                    "PASSWORD": password
+                }
+            )
+            session["username"] = username
+            session["access_token"] = resp["AuthenticationResult"]["AccessToken"]
+            return redirect(url_for("profile"))
+        except Exception as e:
+            return f"❌ Login error: {str(e)}"
+    return render_template("login.html")
 
-    response = requests.get(url)
-    if response.status_code != 200:
-        return jsonify({"error": "Failed to fetch data"}), 400
+@app.route("/profile")
+def profile():
+    if "username" not in session:
+        return redirect(url_for("login"))
+    return render_template("profile.html", username=session["username"])
 
-    data = response.json()
-    if "results" not in data:
-        return jsonify({"error": "Invalid symbol or no data"}), 400
-
-    closes = [item["c"] for item in data["results"]]
-    closes_array = np.array(closes)
-
-    # Calculate RSI
-    def calculate_rsi(prices, period=14):
-        deltas = np.diff(prices)
-        seed = deltas[:period]
-        up = seed[seed >= 0].sum() / period
-        down = -seed[seed < 0].sum() / period
-        rs = up / down if down != 0 else 0
-        rsi = np.zeros_like(prices)
-        rsi[:period] = 100. - 100. / (1. + rs)
-
-        for i in range(period, len(prices)):
-            delta = deltas[i - 1]
-            if delta > 0:
-                upval = delta
-                downval = 0.
-            else:
-                upval = 0.
-                downval = -delta
-            up = (up * (period - 1) + upval) / period
-            down = (down * (period - 1) + downval) / period
-            rs = up / down if down != 0 else 0
-            rsi[i] = 100. - 100. / (1. + rs)
-
-        return rsi
-
-    rsi_value = calculate_rsi(closes_array)[-1]
-    moving_avg = closes_array[:20].mean()
-
-    recommendation = (
-        "Buy (Oversold)" if rsi_value < 30 else
-        "Sell (Overbought)" if rsi_value > 70 else
-        "Hold"
-    )
-
-    return jsonify({
-        "symbol": symbol.upper(),
-        "latest_price": closes_array[0],
-        "rsi": round(rsi_value, 2),
-        "moving_average_20": round(moving_avg, 2),
-        "recommendation": recommendation
-    })
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
