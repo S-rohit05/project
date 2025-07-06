@@ -1,0 +1,3 @@
+cd /home/ec2-user/project
+git pull
+sudo systemctl restart flaskapp
